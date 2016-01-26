@@ -316,18 +316,138 @@ def rescan_repository(self, repo):
 def issue_comment_created(issue_comment):
     """
     A GitHub comment has been written to an issue or pull request.
+    Set the JIRA issue to "Needs Triage" if the comment includes the phrase
+    "Please Review".
+    Returns a boolean: True if the JIRA issue either was correctly updated
+    or did not need to be updated, or False otherwise. (However,
+    these booleans are ignored.)
     """
+
+    # For now, all we do on issue comments is see if they have the special
+    # "Please Review" keywords.
+    review_flag = has_review_flag(issue_comment)
+    if not review_flag:
+        return False
+
+    issue_key = get_jira_issue_key_from_comment(issue_comment)
+    repo = issue_comment["repository"]["full_name"].decode('utf-8')
+    num = issue_comment["issue"]["number"],
+
+    if not issue_key:
+        logger.info(
+            "Couldn't find JIRA issue for Issue #{num} against {repo}".format(
+                num=num, repo=repo,
+            ),
+        )
+        return "no JIRA issue :("
+    sentry.client.extra_context({"jira_key": issue_key})
+
+    jira = jira_bp.session
+
+    # TODO: ensure closed issues can't be sent to Triage.
+    # TODO: move the functionality below into a new shared function.
+
+    # Change existing JIRA issue to "Needs Triage"
+    transition_url = (
+        "/rest/api/2/issue/{key}/transitions"
+        "?expand=transitions.fields".format(key=issue_key)
+    )
+    transitions_resp = jira.get(transition_url)
+    if transitions_resp.status_code == 404:
+        # JIRA issue has been deleted
+        return False
+    transitions_resp.raise_for_status()
+
+    transitions = transitions_resp.json()["transitions"]
+    sentry.client.extra_context({"transitions": transitions})
+
+    transition_name = "Needs Triage"
+    transition_id = None
+    for t in transitions:
+        if t["to"]["name"] == transition_name:
+            transition_id = t["id"]
+            break
+
+    if not transition_id:
+        # maybe the issue is *already* in the right status?
+        issue_url = "/rest/api/2/issue/{key}".format(key=issue_key)
+        issue_resp = jira.get(issue_url)
+        issue_resp.raise_for_status()
+        issue = issue_resp.json()
+        sentry.client.extra_context({"jira_issue": issue})
+        current_status = issue["fields"]["status"]["name"].decode("utf-8")
+        if current_status == transition_name:
+            msg = "{key} is already in status {status}".format(
+                key=issue_key, status=transition_name
+            )
+            logger.info(msg)
+            return False
+
+        # nope, raise an error message
+        fail_msg = (
+            "{key} cannot be transitioned directly from status {curr_status} "
+            "to status {new_status}. Valid status transitions are: {valid}".format(
+                key=issue_key,
+                new_status=transition_name,
+                curr_status=current_status,
+                valid=", ".join(t["to"]["name"].decode('utf-8') for t in transitions),
+            )
+        )
+        raise Exception(fail_msg)
+
+    transition_resp = jira.post(transition_url, json={
+        "transition": {
+            "id": transition_id,
+        }
+    })
+
+    transition_resp.raise_for_status()
+    logger.info(
+        "Issue #{num} against {repo} was marked as needing review, moving {issue} "
+        "to status {status}".format(
+            num=num,
+            repo=repo,
+            issue=issue_key,
+            status="Needs Triage",
+        ),
+    )
+
     return True
+
+
+def has_review_flag(issue_comment):
+    comment_body = issue_comment["comment"]["body"]
+
+    # search for code phrase
+    # TODO: pull the code phrase into a constant somewhere
+    match = re.search(r"Please Review", comment_body, re.IGNORECASE)
+    return bool(match)
+
+
+def get_jira_issue_key_from_comment(issue_comment):
+    me = github_whoami
+    my_username = me["login"]
+    comments_url = issue_comment["issue"]["comments_url"]
+
+    return get_jira_issue_key_from_comments_url(comments_url)
 
 
 def get_jira_issue_key(pull_request):
     me = github_whoami()
     my_username = me["login"]
-    comment_url = "/repos/{repo}/issues/{num}/comments".format(
+    comments_url = "/repos/{repo}/issues/{num}/comments".format(
         repo=pull_request["base"]["repo"]["full_name"].decode('utf-8'),
         num=pull_request["number"],
     )
-    for comment in paginated_get(comment_url, session=github_bp.session):
+
+    return get_jira_issue_key_from_comments_url(comments_url)
+
+
+def get_jira_issue_key_from_comments_url(comments_url):
+    me = github_whoami()
+    my_username = me["login"]
+
+    for comment in paginated_get(comments_url, session=github_bp.session):
         # I only care about comments I made
         if comment["user"]["login"] != my_username:
             continue
