@@ -20,7 +20,7 @@ from openedx_webhooks.info import (
     )
 from openedx_webhooks.utils import paginated_get, minimal_wsgi_environ
 from openedx_webhooks.tasks.github import (
-    pull_request_opened, pull_request_closed, rescan_repository
+    pull_request_opened, pull_request_closed, rescan_repository, issue_comment_created
 )
 
 github_bp = Blueprint('github_views', __name__)
@@ -67,6 +67,34 @@ def pull_request():
             file=sys.stderr
         )
         return "Don't know how to handle this.", 400
+
+    status_url = url_for("tasks.status", task_id=result.id, _external=True)
+    resp = jsonify({"message": "queued", "status_url": status_url})
+    resp.status_code = 202
+    resp.headers["Location"] = status_url
+    return resp
+
+
+@github_bp.route("/issue_comment", methods=("POST",))
+def issue_comment():
+    """
+    Process a `IssueCommentEvent`_ from Github.
+
+    .. _IssueCommentEvent: https://developer.github.com/v3/activity/events/types/#issuecommentevent
+    """
+    try:
+        event = request.get_json()
+    except ValueError:
+        raise ValueError("Invalid JSON from Github: {data}".format(data=request.data))
+    sentry.client.extra_context({"event": event})
+
+    if "issue_comment" not in event and "hook" in event and "zen" in event:
+        # this is a ping
+        repo = event.get("repository", {}).get("full_name")
+        print("ping from {repo}".format(repo=repo), file=sys.stderr)
+        return "PONG"
+
+    result = issue_comment_created.delay(event)
 
     status_url = url_for("tasks.status", task_id=result.id, _external=True)
     resp = jsonify({"message": "queued", "status_url": status_url})

@@ -312,6 +312,14 @@ def rescan_repository(self, repo):
     return info
 
 
+@celery.task
+def issue_comment_created(issue_comment):
+    """
+    A GitHub comment has been written to an issue or pull request.
+    """
+    return True
+
+
 def get_jira_issue_key(pull_request):
     me = github_whoami()
     my_username = me["login"]
