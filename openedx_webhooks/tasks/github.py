@@ -363,9 +363,9 @@ def issue_comment_created(issue_comment):
 
     transition_name = "Needs Triage"
     transition_id = None
-    for t in transitions:
-        if t["to"]["name"] == transition_name:
-            transition_id = t["id"]
+    for transition in transitions:
+        if transition["to"]["name"] == transition_name:
+            transition_id = transition["id"]
             break
 
     if not transition_id:
@@ -425,16 +425,12 @@ def has_review_flag(issue_comment):
 
 
 def get_jira_issue_key_from_comment(issue_comment):
-    me = github_whoami
-    my_username = me["login"]
     comments_url = issue_comment["issue"]["comments_url"]
 
     return get_jira_issue_key_from_comments_url(comments_url)
 
 
 def get_jira_issue_key(pull_request):
-    me = github_whoami()
-    my_username = me["login"]
     comments_url = "/repos/{repo}/issues/{num}/comments".format(
         repo=pull_request["base"]["repo"]["full_name"].decode('utf-8'),
         num=pull_request["number"],
