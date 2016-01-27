@@ -190,70 +190,21 @@ def pull_request_closed(pull_request):
     sentry.client.extra_context({"jira_key": issue_key})
 
     # close the issue on JIRA
-    transition_url = (
-        "/rest/api/2/issue/{key}/transitions"
-        "?expand=transitions.fields".format(key=issue_key)
-    )
-    transitions_resp = jira.get(transition_url)
-    if transitions_resp.status_code == 404:
-        # JIRA issue has been deleted
-        return False
-    transitions_resp.raise_for_status()
-
-    transitions = transitions_resp.json()["transitions"]
-
-    sentry.client.extra_context({"transitions": transitions})
-
     transition_name = "Merged" if merged else "Rejected"
-    transition_id = None
-    for t in transitions:
-        if t["to"]["name"] == transition_name:
-            transition_id = t["id"]
-            break
+    success = transition_status(issue_key, transition_name)
 
-    if not transition_id:
-        # maybe the issue is *already* in the right status?
-        issue_url = "/rest/api/2/issue/{key}".format(key=issue_key)
-        issue_resp = jira.get(issue_url)
-        issue_resp.raise_for_status()
-        issue = issue_resp.json()
-        sentry.client.extra_context({"jira_issue": issue})
-        current_status = issue["fields"]["status"]["name"].decode("utf-8")
-        if current_status == transition_name:
-            msg = "{key} is already in status {status}".format(
-                key=issue_key, status=transition_name
-            )
-            logger.info(msg)
-            return False
-
-        # nope, raise an error message
-        fail_msg = (
-            "{key} cannot be transitioned directly from status {curr_status} "
-            "to status {new_status}. Valid status transitions are: {valid}".format(
-                key=issue_key,
-                new_status=transition_name,
-                curr_status=current_status,
-                valid=", ".join(t["to"]["name"].decode('utf-8') for t in transitions),
-            )
+    if success:
+        logger.info(
+            "PR #{num} against {repo} was {action}, moving {issue} to status {status}".format(
+                num=pr["number"],
+                repo=repo,
+                action="merged" if merged else "closed",
+                issue=issue_key,
+                status="Merged" if merged else "Rejected",
+            ),
         )
-        raise Exception(fail_msg)
 
-    transition_resp = jira.post(transition_url, json={
-        "transition": {
-            "id": transition_id,
-        }
-    })
-    transition_resp.raise_for_status()
-    logger.info(
-        "PR #{num} against {repo} was {action}, moving {issue} to status {status}".format(
-            num=pr["number"],
-            repo=repo,
-            action="merged" if merged else "closed",
-            issue=issue_key,
-            status="Merged" if merged else "Rejected",
-        ),
-    )
-    return True
+    return success
 
 
 @celery.task(bind=True)
@@ -342,12 +293,33 @@ def issue_comment_created(issue_comment):
         return "no JIRA issue :("
     sentry.client.extra_context({"jira_key": issue_key})
 
-    jira = jira_bp.session
-
     # TODO: ensure closed issues can't be sent to Triage.
-    # TODO: move the functionality below into a new shared function.
 
     # Change existing JIRA issue to "Needs Triage"
+    transition_name = "Needs Triage"
+    success = transition_status(issue_key, transition_name)
+
+    if success:
+        logger.info(
+            "Issue #{num} against {repo} was marked as needing review, moving {issue} "
+            "to status {status}".format(
+                num=num,
+                repo=repo,
+                issue=issue_key,
+                status=transition_name,
+            ),
+        )
+
+    return success
+
+
+def transition_status(issue_key, transition_name):
+    """
+    Attempt to set JIRA issue status to transition_name.
+    Returns True if status was succesfully changed.
+    """
+    jira = jira_bp.session
+
     transition_url = (
         "/rest/api/2/issue/{key}/transitions"
         "?expand=transitions.fields".format(key=issue_key)
@@ -359,9 +331,9 @@ def issue_comment_created(issue_comment):
     transitions_resp.raise_for_status()
 
     transitions = transitions_resp.json()["transitions"]
+
     sentry.client.extra_context({"transitions": transitions})
 
-    transition_name = "Needs Triage"
     transition_id = None
     for transition in transitions:
         if transition["to"]["name"] == transition_name:
@@ -402,15 +374,6 @@ def issue_comment_created(issue_comment):
     })
 
     transition_resp.raise_for_status()
-    logger.info(
-        "Issue #{num} against {repo} was marked as needing review, moving {issue} "
-        "to status {status}".format(
-            num=num,
-            repo=repo,
-            issue=issue_key,
-            status="Needs Triage",
-        ),
-    )
 
     return True
 
