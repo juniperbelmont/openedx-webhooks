@@ -174,7 +174,6 @@ def pull_request_closed(pull_request):
     if the JIRA issue was correctly synchronized, False otherwise. (However,
     these booleans are ignored.)
     """
-    jira = jira_bp.session
     pr = pull_request
     repo = pr["base"]["repo"]["full_name"].decode('utf-8')
 
